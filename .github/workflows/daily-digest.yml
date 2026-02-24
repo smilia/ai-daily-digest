@@ -69,17 +69,32 @@ jobs:
             """从 digest.md 提取文章信息"""
             articles = []
             
-            # 匹配文章标题和链接
-            pattern = r'\*\*(.+?)\*\*.*?\[(.+?)\]\((.+?)\).*?— \*\*(.+?)\*\*.*?· ⭐ (\d+/\d+)'  
-            matches = re.findall(pattern, content, re.DOTALL)
+            # 分割每个文章块（以 --- 分隔）
+            article_blocks = re.split(r'\n---\n', content)
             
-            for match in matches[:10]:  # 最多10篇
-                title, link_text, url, source, score = match
+            for block in article_blocks[:10]:  # 最多10篇
+                # 匹配标题：### 数字. 标题
+                title_match = re.search(r'### \d+\.\s*(.+?)\n', block)
+                if not title_match:
+                    continue
+                title = title_match.group(1).strip()
+                
+                # 匹配链接和来源：[链接文本](链接) — **来源** · 时间 · ⭐ 分数
+                link_match = re.search(r'\[(.+?)\]\((.+?)\)\s*—\s*\*\*(.+?)\*\*\s*·\s*[^·]+·\s*⭐\s*(\d+/\d+)', block)
+                if not link_match:
+                    continue
+                link_text, url, source, score = link_match.groups()
+                
+                # 匹配摘要：> 摘要内容
+                summary_match = re.search(r'>\s*(.+?)(?=\n|$)', block)
+                summary = summary_match.group(1).strip() if summary_match else ""
+                
                 articles.append({
-                    'title': title.strip(),
+                    'title': title,
                     'url': url.strip(),
                     'source': source.strip(),
-                    'score': score.strip()
+                    'score': score.strip(),
+                    'summary': summary
                 })
             
             return articles
@@ -94,11 +109,18 @@ jobs:
             # 构建卡片内容
             elements = []
             for i, article in enumerate(articles, 1):
+                # 构建文章内容
+                content = f"**{i}. [{article['title']}]({article['url']})**\n📰 {article['source']} · ⭐ {article['score']}"
+                if article.get('summary'):
+                    # 限制摘要长度，避免消息过长
+                    summary = article['summary'][:100] + "..." if len(article['summary']) > 100 else article['summary']
+                    content += f"\n💡 {summary}"
+                
                 elements.append({
                     "tag": "div",
                     "text": {
                         "tag": "lark_md",
-                        "content": f"**{i}. [{article['title']}]({article['url']})**\n📰 {article['source']} · ⭐ {article['score']}"
+                        "content": content
                     }
                 })
                 elements.append({"tag": "hr"})
