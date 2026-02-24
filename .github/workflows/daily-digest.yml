@@ -54,9 +54,9 @@ jobs:
         echo "========== end of digest.md =========="
     
     - name: Extract and Send to Feishu
-      env:
-        FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
       run: |
+        export FEISHU_WEBHOOK="${{ secrets.FEISHU_WEBHOOK_URL }}"
+        
         # 创建 Python 脚本来提取内容并发送到飞书
         cat > extract_and_send.py << 'PYTHON_SCRIPT'
         import re
