@@ -21,8 +21,21 @@ jobs:
       - name: Generate Digest
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ARCEE_API_KEY: ${{ secrets.ARCEE_API_KEY }}
         run: |
-          bun scripts/digest.ts --hours 24 --top-n 10 --lang zh --output ./digest.md
+          # 尝试使用 Gemini，如果失败则使用 Arcee AI
+          echo "Trying Gemini API..."
+          bun scripts/digest.ts --hours 24 --top-n 10 --lang zh --output ./digest.md || {
+            echo "Gemini failed, trying Arcee AI..."
+            
+            # 修改脚本使用 Arcee AI
+            export OPENAI_API_KEY="$ARCEE_API_KEY"
+            export OPENAI_API_BASE="https://api.arcee.ai/api/v1"
+            export OPENAI_MODEL="arcee-auto"
+            
+            # 重新运行脚本
+            bun scripts/digest.ts --hours 24 --top-n 10 --lang zh --output ./digest.md
+          }
           
           echo "========== digest.md content =========="
           cat digest.md
@@ -50,7 +63,7 @@ jobs:
               scanned = stats_match.group(1).strip()
               fetched = stats_match.group(2).strip()
               time_range = stats_match.group(3).strip()
-              selected = stats_match.group(4).strip()
+              selected = stats_match.group(4).strip().replace('**', '').replace('篇', '').strip()
           else:
               scanned, fetched, time_range, selected = "92", "-", "24h", "10"
           
@@ -60,7 +73,7 @@ jobs:
           md_content += f"• 时间范围：{time_range}\\n"
           md_content += f"• 精选：{selected} 篇\\n\\n"
           md_content += "---\\n\\n"
-          md_content += "**🏆 今日必读 Top 5**\\n\\n"
+          md_content += "**🏆 今日必读 Top 3**\\n\\n"
           
           # 提取今日必读部分
           top_section = re.search(r'## 🏆 今日必读(.*?)(?=## |$)', content, re.DOTALL)
@@ -72,7 +85,6 @@ jobs:
               # 按文章分割（以 🥇 🥈 🥉 为分隔）
               articles = re.split(r'(🥇|🥈|🥉)', section)
               
-              current_emoji = ""
               for i in range(1, len(articles), 2):
                   if i < len(articles):
                       emoji = articles[i]
@@ -84,7 +96,6 @@ jobs:
                       
                       # 提取链接 [text](url)
                       link_match = re.search(r'$$([^$$]+)\]$(https?://[^)]+)$', article_content)
-                      link_text = link_match.group(1) if link_match else title
                       link_url = link_match.group(2) if link_match else ""
                       
                       # 提取来源 — source · time · category
@@ -95,7 +106,7 @@ jobs:
                       summary_match = re.search(r'>\s*([^\n]+)', article_content)
                       summary = summary_match.group(1).strip() if summary_match else ""
                       
-                      print(f"DEBUG: {emoji} {title[:50]}...")
+                      print(f"DEBUG: {emoji} {title[:50]}... link={link_url[:50] if link_url else 'None'}")
                       
                       # 构建输出
                       if link_url:
@@ -123,9 +134,6 @@ jobs:
           
           # 运行 Python 脚本
           python3 extract.py
-          
-          # 读取提取的内容
-          ARTICLES_MD=$(cat extracted_content.txt)
           
           # 构建飞书卡片 JSON
           python3 << EOF > feishu_payload.json
