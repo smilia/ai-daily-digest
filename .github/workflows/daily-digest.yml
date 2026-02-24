@@ -23,19 +23,22 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           ARCEE_API_KEY: ${{ secrets.ARCEE_API_KEY }}
         run: |
-          # 尝试使用 Gemini，如果失败则使用 Arcee AI
+          # 先尝试使用 Gemini
           echo "Trying Gemini API..."
-          bun scripts/digest.ts --hours 24 --top-n 10 --lang zh --output ./digest.md || {
-            echo "Gemini failed, trying Arcee AI..."
+          bun scripts/digest.ts --hours 24 --top-n 10 --lang zh --output ./digest.md 2>&1 || GEMINI_FAILED=1
+          
+          # 检查是否失败（通过检查文件内容或错误标志）
+          if [ -n "$GEMINI_FAILED" ] || ! grep -q "🏆 今日必读" digest.md 2>/dev/null; then
+            echo "Gemini failed or output incomplete, trying Arcee AI..."
             
-            # 修改脚本使用 Arcee AI
+            # 使用 Arcee AI (OpenAI 兼容格式)
             export OPENAI_API_KEY="$ARCEE_API_KEY"
             export OPENAI_API_BASE="https://api.arcee.ai/api/v1"
-            export OPENAI_MODEL="arcee-auto"
+            export OPENAI_MODEL="trinity-mini"
             
-            # 重新运行脚本
+            echo "Using Arcee AI with model: $OPENAI_MODEL"
             bun scripts/digest.ts --hours 24 --top-n 10 --lang zh --output ./digest.md
-          }
+          fi
           
           echo "========== digest.md content =========="
           cat digest.md
