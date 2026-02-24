@@ -34,8 +34,10 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y jq
           
-          ARTICLES_MD=$(python3 << 'PYTHON'
+          # 创建 Python 脚本文件
+          cat > extract.py << 'PYEOF'
           import re
+          import json
           
           with open('digest.md', 'r', encoding='utf-8') as f:
               content = f.read()
@@ -58,68 +60,79 @@ jobs:
           md_content += f"• 时间范围：{time_range}\\n"
           md_content += f"• 精选：{selected} 篇\\n\\n"
           md_content += "---\\n\\n"
-          md_content += "**🏆 今日必读**\\n\\n"
+          md_content += "**🏆 今日必读 Top 5**\\n\\n"
           
-          # 提取今日必读部分 - 更宽松的模式
+          # 提取今日必读部分
           top_section = re.search(r'## 🏆 今日必读(.*?)(?=## |$)', content, re.DOTALL)
           
           if top_section:
               section = top_section.group(1)
               print("DEBUG: Top section found, length:", len(section))
               
-              # 查找所有文章块
-              # 文章格式：🥇 **标题** — 来源 · 时间 · 分类\n\n> 摘要\n\n链接
-              article_blocks = re.findall(
-                  r'(🥇|🥈|🥉)\s+\*\*([^*]+)\*\*\s*—\s*([^·\n]+)[^\\n]*\\n\\n>\s*([^\\n]+)(?:\\n\\n)?(?:\$$([^$$]+)\]$([^)]+)$)?',
-                  section,
-                  re.DOTALL
-              )
+              # 按文章分割（以 🥇 🥈 🥉 为分隔）
+              articles = re.split(r'(🥇|🥈|🥉)', section)
               
-              print(f"DEBUG: Found {len(article_blocks)} articles with detailed pattern")
-              
-              for i, (emoji, title, source, summary, link_text, link_url) in enumerate(article_blocks[:5], 1):
-                  clean_title = title.strip()
-                  clean_source = source.strip()
-                  clean_summary = summary.strip()
-                  
-                  print(f"DEBUG: Article {i}: {clean_title[:50]}...")
-                  
-                  if link_url:
-                      md_content += f"{emoji} [{clean_title}]({link_url})\\n"
-                  else:
-                      md_content += f"{emoji} {clean_title}\\n"
-                  
-                  md_content += f"📰 {clean_source}\\n"
-                  md_content += f"💡 {clean_summary[:120]}\\n\\n"
-              
-              # 如果没匹配到详细格式，尝试简单提取
-              if len(article_blocks) == 0:
-                  print("DEBUG: Trying simple pattern")
-                  simple_articles = re.findall(r'(🥇|🥈|🥉)\s+\*\*([^*]+)\*\*', section)
-                  print(f"DEBUG: Found {len(simple_articles)} articles with simple pattern")
-                  
-                  for emoji, title in simple_articles[:5]:
-                      clean_title = title.strip()
-                      md_content += f"{emoji} {clean_title}\\n\\n"
+              current_emoji = ""
+              for i in range(1, len(articles), 2):
+                  if i < len(articles):
+                      emoji = articles[i]
+                      article_content = articles[i+1] if i+1 < len(articles) else ""
+                      
+                      # 提取标题（**标题**）
+                      title_match = re.search(r'\*\*([^*]+)\*\*', article_content)
+                      title = title_match.group(1).strip() if title_match else "未知标题"
+                      
+                      # 提取链接 [text](url)
+                      link_match = re.search(r'$$([^$$]+)\]$(https?://[^)]+)$', article_content)
+                      link_text = link_match.group(1) if link_match else title
+                      link_url = link_match.group(2) if link_match else ""
+                      
+                      # 提取来源 — source · time · category
+                      source_match = re.search(r'—\s*([^·\n]+)', article_content)
+                      source = source_match.group(1).strip() if source_match else ""
+                      
+                      # 提取摘要（> 开头）
+                      summary_match = re.search(r'>\s*([^\n]+)', article_content)
+                      summary = summary_match.group(1).strip() if summary_match else ""
+                      
+                      print(f"DEBUG: {emoji} {title[:50]}...")
+                      
+                      # 构建输出
+                      if link_url:
+                          md_content += f"{emoji} [{title}]({link_url})\\n"
+                      else:
+                          md_content += f"{emoji} {title}\\n"
+                      
+                      if source:
+                          md_content += f"📰 {source}\\n"
+                      if summary:
+                          md_content += f"💡 {summary[:100]}...\\n"
+                      md_content += "\\n"
+                      
+                      if i >= 5:  # 只取前3篇
+                          break
           
-          else:
-              print("DEBUG: Top section not found!")
-              # 尝试查找任何带emoji的标题
-              all_emoji = re.findall(r'(🥇|🥈|🥉)[^\n]*', content)
-              print(f"DEBUG: Found {len(all_emoji)} emoji lines in full content")
-          
-          print("DEBUG: Final content length:", len(md_content))
-          print("=== EXTRACTED CONTENT START ===")
+          print("=== EXTRACTED CONTENT ===")
           print(md_content)
-          print("=== EXTRACTED CONTENT END ===")
-          PYTHON
-          )
+          print("=== END ===")
           
-          # 使用 Python 正确转义 JSON
-          JSON_DATA=$(python3 << EOF
+          # 输出到文件供后续使用
+          with open('extracted_content.txt', 'w', encoding='utf-8') as f:
+              f.write(md_content)
+          PYEOF
+          
+          # 运行 Python 脚本
+          python3 extract.py
+          
+          # 读取提取的内容
+          ARTICLES_MD=$(cat extracted_content.txt)
+          
+          # 构建飞书卡片 JSON
+          python3 << EOF > feishu_payload.json
           import json
           
-          content = '''$ARTICLES_MD'''
+          with open('extracted_content.txt', 'r', encoding='utf-8') as f:
+              content = f.read()
           
           data = {
               "msg_type": "interactive",
@@ -158,15 +171,18 @@ jobs:
           
           print(json.dumps(data))
           EOF
-          )
           
           echo "=== Sending to Feishu ==="
+          cat feishu_payload.json
+          
           curl -X POST "$FEISHU_WEBHOOK" \
             -H "Content-Type: application/json" \
-            -d "$JSON_DATA"
+            -d @feishu_payload.json
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: daily-digest-${{ github.run_id }}
-          path: digest.md
+          path: |
+            digest.md
+            extracted_content.txt
