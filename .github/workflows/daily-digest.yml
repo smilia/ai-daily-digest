@@ -35,14 +35,14 @@ jobs:
       with:
         bun-version: latest
     
-    - name: Generate Digest with Arcee AI
+    - name: Generate Digest with OpenRouter (Trinity Large Preview Free)
       env:
-        # 使用 Arcee AI 作为主要 API
-        OPENAI_API_KEY: ${{ secrets.ARCEE_API_KEY }}
-        OPENAI_API_BASE: https://api.arcee.ai/api/v1
-        OPENAI_MODEL: trinity-mini
+        # 使用 OpenRouter 的 Trinity Large Preview (free) 模型
+        OPENAI_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        OPENAI_API_BASE: https://openrouter.ai/api/v1
+        OPENAI_MODEL: arcee-ai/trinity-large-preview:free
       run: |
-        echo "Using Arcee AI with model: trinity-mini"
+        echo "Using OpenRouter with model: arcee-ai/trinity-large-preview:free"
         bun scripts/digest.ts \
           --hours ${{ github.event.inputs.hours || '24' }} \
           --top-n ${{ github.event.inputs.top_n || '10' }} \
