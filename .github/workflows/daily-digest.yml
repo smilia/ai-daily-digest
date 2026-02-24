@@ -35,9 +35,6 @@ jobs:
       with:
         bun-version: latest
     
-    - name: Install dependencies
-      run: bun install
-    
     - name: Generate Digest with Arcee AI
       env:
         # 使用 Arcee AI 作为主要 API
