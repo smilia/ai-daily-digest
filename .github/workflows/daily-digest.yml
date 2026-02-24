@@ -24,9 +24,9 @@ jobs:
         run: |
           bun scripts/digest.ts --hours 24 --top-n 10 --lang zh --output ./digest.md
           
-          # 输出生成的内容用于调试
-          echo "=== Generated digest.md ==="
-          head -100 digest.md
+          echo "========== digest.md content =========="
+          cat digest.md
+          echo "========== end of digest.md =========="
 
       - name: Extract and Send to Feishu
         env:
@@ -39,6 +39,8 @@ jobs:
           
           with open('digest.md', 'r', encoding='utf-8') as f:
               content = f.read()
+          
+          print("DEBUG: File loaded, length:", len(content))
           
           # 提取统计信息
           stats_match = re.search(r'\| 扫描源 \| 抓取文章 \| 时间范围 \| 精选 \|\n\|[^|]+\|[^|]+\|[^|]+\|[^|]+\|\n\|([^|]+)\|([^|]+)\|([^|]+)\|([^|]+)\|', content)
@@ -56,106 +58,109 @@ jobs:
           md_content += f"• 时间范围：{time_range}\\n"
           md_content += f"• 精选：{selected} 篇\\n\\n"
           md_content += "---\\n\\n"
-          md_content += "**🏆 今日必读 Top 5**\\n\\n"
+          md_content += "**🏆 今日必读**\\n\\n"
           
-          # 提取今日必读部分
-          top_section = re.search(r'## 🏆 今日必读(.*?)(?:## 📊|## 📝|$)', content, re.DOTALL)
+          # 提取今日必读部分 - 更宽松的模式
+          top_section = re.search(r'## 🏆 今日必读(.*?)(?=## |$)', content, re.DOTALL)
           
           if top_section:
               section = top_section.group(1)
+              print("DEBUG: Top section found, length:", len(section))
               
-              # 提取文章块：标题、来源、摘要
-              # 格式：🥇 Title — source · time · category\n\n> summary
-              pattern = r'(🥇|🥈|🥉)\s+([^—\n]+)—\s*([^·\n]+)[^\\n]*\\n\\n>\s*([^\n]+)'
-              matches = re.findall(pattern, section, re.DOTALL)
+              # 查找所有文章块
+              # 文章格式：🥇 **标题** — 来源 · 时间 · 分类\n\n> 摘要\n\n链接
+              article_blocks = re.findall(
+                  r'(🥇|🥈|🥉)\s+\*\*([^*]+)\*\*\s*—\s*([^·\n]+)[^\\n]*\\n\\n>\s*([^\\n]+)(?:\\n\\n)?(?:\$$([^$$]+)\]$([^)]+)$)?',
+                  section,
+                  re.DOTALL
+              )
               
-              for emoji, title, source, summary in matches[:5]:
+              print(f"DEBUG: Found {len(article_blocks)} articles with detailed pattern")
+              
+              for i, (emoji, title, source, summary, link_text, link_url) in enumerate(article_blocks[:5], 1):
                   clean_title = title.strip()
                   clean_source = source.strip()
                   clean_summary = summary.strip()
                   
-                  # 尝试在标题附近找链接 [title](url)
-                  # 链接可能在标题后的任何位置
-                  title_escaped = re.escape(clean_title[:30])  # 只取前30字符避免特殊字符
-                  link_pattern = r'$$([^$$]*' + title_escaped + r'[^\]]*)\]$(https?://[^)]+)$'
-                  link_match = re.search(link_pattern, content, re.IGNORECASE)
+                  print(f"DEBUG: Article {i}: {clean_title[:50]}...")
                   
-                  if link_match:
-                      link_url = link_match.group(2)
+                  if link_url:
                       md_content += f"{emoji} [{clean_title}]({link_url})\\n"
                   else:
                       md_content += f"{emoji} {clean_title}\\n"
                   
                   md_content += f"📰 {clean_source}\\n"
-                  md_content += f"💡 {clean_summary[:100]}...\\n\\n"  # 限制摘要长度
+                  md_content += f"💡 {clean_summary[:120]}\\n\\n"
+              
+              # 如果没匹配到详细格式，尝试简单提取
+              if len(article_blocks) == 0:
+                  print("DEBUG: Trying simple pattern")
+                  simple_articles = re.findall(r'(🥇|🥈|🥉)\s+\*\*([^*]+)\*\*', section)
+                  print(f"DEBUG: Found {len(simple_articles)} articles with simple pattern")
+                  
+                  for emoji, title in simple_articles[:5]:
+                      clean_title = title.strip()
+                      md_content += f"{emoji} {clean_title}\\n\\n"
           
-          # 如果没提取到，使用备用方案
-          if "🥇" not in md_content or len(md_content) < 200:
-              # 简单提取所有带emoji的标题行
-              lines = content.split('\n')
-              count = 0
-              emojis = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣']
-              for line in lines:
-                  if any(e in line for e in ['🥇', '🥈', '🥉']):
-                      # 清理行
-                      clean_line = line.strip()
-                      if clean_line and count < 5:
-                          md_content += f"{emojis[count]} {clean_line.replace('🥇', '').replace('🥈', '').replace('🥉', '').strip()}\\n\\n"
-                          count += 1
+          else:
+              print("DEBUG: Top section not found!")
+              # 尝试查找任何带emoji的标题
+              all_emoji = re.findall(r'(🥇|🥈|🥉)[^\n]*', content)
+              print(f"DEBUG: Found {len(all_emoji)} emoji lines in full content")
           
+          print("DEBUG: Final content length:", len(md_content))
+          print("=== EXTRACTED CONTENT START ===")
           print(md_content)
+          print("=== EXTRACTED CONTENT END ===")
           PYTHON
           )
           
-          echo "=== Extracted content ==="
-          echo "$ARTICLES_MD"
+          # 使用 Python 正确转义 JSON
+          JSON_DATA=$(python3 << EOF
+          import json
           
-          # 转义特殊字符用于 JSON
-          ARTICLES_ESCAPED=$(echo "$ARTICLES_MD" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+          content = '''$ARTICLES_MD'''
           
-          # 构建飞书卡片 JSON
-          JSON_DATA=$(jq -n \
-            --arg title "📰 AI 每日精选日报 $(date +%Y-%m-%d)" \
-            --arg content "$ARTICLES_MD" \
-            --arg url "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            '{
+          data = {
               "msg_type": "interactive",
               "card": {
-                "config": {"wide_screen_mode": true},
-                "header": {
-                  "title": {"tag": "plain_text", "content": $title},
-                  "template": "blue"
-                },
-                "elements": [
-                  {
-                    "tag": "div",
-                    "text": {"tag": "lark_md", "content": $content}
+                  "config": {"wide_screen_mode": True},
+                  "header": {
+                      "title": {"tag": "plain_text", "content": "📰 AI 每日精选日报 $(date +%Y-%m-%d)"},
+                      "template": "blue"
                   },
-                  {
-                    "tag": "hr"
-                  },
-                  {
-                    "tag": "note",
-                    "elements": [{"tag": "plain_text", "content": "🤖 由 AI 智能评分筛选 | 点击按钮查看更多详情"}]
-                  },
-                  {
-                    "tag": "action",
-                    "actions": [
+                  "elements": [
                       {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "📄 查看完整日报"},
-                        "type": "primary",
-                        "url": $url
+                          "tag": "div",
+                          "text": {"tag": "lark_md", "content": content}
+                      },
+                      {
+                          "tag": "hr"
+                      },
+                      {
+                          "tag": "note",
+                          "elements": [{"tag": "plain_text", "content": "🤖 由 AI 智能评分筛选 | 点击按钮查看更多详情"}]
+                      },
+                      {
+                          "tag": "action",
+                          "actions": [
+                              {
+                                  "tag": "button",
+                                  "text": {"tag": "plain_text", "content": "📄 查看完整日报"},
+                                  "type": "primary",
+                                  "url": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                              }
+                          ]
                       }
-                    ]
-                  }
-                ]
+                  ]
               }
-            }')
+          }
           
-          echo "=== JSON payload ==="
-          echo "$JSON_DATA" | head -c 1000
+          print(json.dumps(data))
+          EOF
+          )
           
+          echo "=== Sending to Feishu ==="
           curl -X POST "$FEISHU_WEBHOOK" \
             -H "Content-Type: application/json" \
             -d "$JSON_DATA"
