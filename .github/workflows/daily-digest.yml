@@ -24,74 +24,142 @@ jobs:
         run: |
           bun scripts/digest.ts --hours 24 --top-n 10 --lang zh --output ./digest.md
 
-      - name: Prepare Feishu Message
-        id: prepare
-        run: |
-          # 提取今日必读部分（简化版）
-          TOP3=$(sed -n '/## 🏆 今日必读/,/---/p' digest.md | head -30)
-          
-          # 统计信息
-          STATS=$(sed -n '/## 📊 数据概览/,/---/p' digest.md | grep -E "^\|" | head -2)
-          
-          echo "top3<<EOF" >> $GITHUB_OUTPUT
-          echo "$TOP3" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Send to Feishu
+      - name: Extract and Send to Feishu
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK_URL }}
         run: |
-          # 构建飞书卡片消息
+          sudo apt-get update && sudo apt-get install -y jq
+          
+          ARTICLES_MD=$(python3 << 'PYTHON'
+          import re
+          
+          with open('digest.md', 'r', encoding='utf-8') as f:
+              content = f.read()
+          
+          # 提取统计信息
+          stats_match = re.search(r'\| 扫描源 \| 抓取文章 \| 时间范围 \| 精选 \|\n\|[^|]+\|[^|]+\|[^|]+\|[^|]+\|\n\|([^|]+)\|([^|]+)\|([^|]+)\|([^|]+)\|', content)
+          if stats_match:
+              scanned = stats_match.group(1).strip()
+              fetched = stats_match.group(2).strip()
+              time_range = stats_match.group(3).strip()
+              selected = stats_match.group(4).strip()
+          else:
+              scanned, fetched, time_range, selected = "92", "-", "24h", "10"
+          
+          md_content = f"**📊 数据概览**\\n\\n"
+          md_content += f"• 扫描源：{scanned}\\n"
+          md_content += f"• 抓取文章：{fetched}\\n"
+          md_content += f"• 时间范围：{time_range}\\n"
+          md_content += f"• 精选：{selected} 篇\\n\\n"
+          md_content += "---\\n\\n"
+          md_content += "**🏆 今日必读 Top 5**\\n\\n"
+          
+          # 提取今日必读部分的完整文章信息
+          top_section = re.search(r'## 🏆 今日必读(.*?)(?:## |---\n\n##|$)', content, re.DOTALL)
+          
+          if top_section:
+              section = top_section.group(1)
+              
+              # 提取文章块（支持多种格式）
+              # 格式1: 🥇 标题 — 来源 · 时间 · 分类
+              # 格式2: > 摘要
+              article_blocks = re.findall(r'(🥇|🥈|🥉|[0-9]+\.) ([^—\n]+)[^\\n]*\\n\\n> ([^\\n]+)', section)
+              
+              for i, (emoji, title, summary) in enumerate(article_blocks[:5], 1):
+                  clean_title = title.strip()
+                  clean_summary = summary.strip()
+                  
+                  # 尝试提取来源和链接
+                  source_match = re.search(rf'{re.escape(clean_title)}.*?— ([^·]+)', section)
+                  source = source_match.group(1).strip() if source_match else "未知来源"
+                  
+                  # 尝试找到原文链接（在标题附近）
+                  link_pattern = rf'{re.escape(clean_title)}.*?\\n\\n\$$([^$$]+)\\]$([^)]+)$'
+                  link_match = re.search(link_pattern, section, re.DOTALL)
+                  
+                  if link_match:
+                      link_text = link_match.group(1)
+                      link_url = link_match.group(2)
+                      md_content += f"{emoji} [{clean_title}]({link_url})\\n"
+                  else:
+                      md_content += f"{emoji} {clean_title}\\n"
+                  
+                  md_content += f"📰 {source}\\n"
+                  md_content += f"💡 {clean_summary}\\n\\n"
+          
+          # 如果没有提取到，尝试备用方案
+          if "🥇" not in md_content:
+              # 简单提取所有标题
+              titles = re.findall(r'### \d+\. ([^\n]+)', content)
+              for i, title in enumerate(titles[:5], 1):
+                  emoji = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"][i-1] if i <= 5 else "•"
+                  md_content += f"{emoji} {title.strip()}\\n\\n"
+          
+          print(md_content)
+          PYTHON
+          )
+          
+          # 转义特殊字符
+          ARTICLES_ESCAPED=$(echo "$ARTICLES_MD" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | tr '\n' ' ' | sed 's/  */ /g')
+          
+          # 构建飞书卡片
+          JSON_DATA=$(cat <<EOF
+          {
+            "msg_type": "interactive",
+            "card": {
+              "config": {
+                "wide_screen_mode": true
+              },
+              "header": {
+                "title": {
+                  "tag": "plain_text",
+                  "content": "📰 AI 每日精选日报 $(date +%Y-%m-%d)"
+                },
+                "template": "blue"
+              },
+              "elements": [
+                {
+                  "tag": "div",
+                  "text": {
+                    "tag": "lark_md",
+                    "content": "$ARTICLES_ESCAPED"
+                  }
+                },
+                {
+                  "tag": "hr"
+                },
+                {
+                  "tag": "note",
+                  "elements": [
+                    {
+                      "tag": "plain_text",
+                      "content": "🤖 由 AI 智能评分筛选 | 点击按钮查看更多详情"
+                    }
+                  ]
+                },
+                {
+                  "tag": "action",
+                  "actions": [
+                    {
+                      "tag": "button",
+                      "text": {
+                        "tag": "plain_text",
+                        "content": "📄 查看完整日报"
+                      },
+                      "type": "primary",
+                      "url": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+          EOF
+          )
+          
           curl -X POST "$FEISHU_WEBHOOK" \
             -H "Content-Type: application/json" \
-            -d '{
-              "msg_type": "interactive",
-              "card": {
-                "config": {
-                  "wide_screen_mode": true
-                },
-                "header": {
-                  "title": {
-                    "tag": "plain_text",
-                    "content": "📰 AI 每日精选日报 '$(date +%Y-%m-%d)'"
-                  },
-                  "template": "blue"
-                },
-                "elements": [
-                  {
-                    "tag": "div",
-                    "text": {
-                      "tag": "lark_md",
-                      "content": "**🏆 今日必读 Top 3**\n\n从 90+ 顶级技术博客中精选，AI 智能评分筛选"
-                    }
-                  },
-                  {
-                    "tag": "hr"
-                  },
-                  {
-                    "tag": "div",
-                    "text": {
-                      "tag": "lark_md",
-                      "content": "详细日报已生成，请查看附件或访问 GitHub Actions 产物"
-                    }
-                  },
-                  {
-                    "tag": "action",
-                    "actions": [
-                      {
-                        "tag": "button",
-                        "text": {
-                          "tag": "plain_text",
-                          "content": "查看完整日报"
-                        },
-                        "type": "primary",
-                        "url": "https://github.com/'${{ github.repository }}'/actions/runs/'${{ github.run_id }}'"
-                      }
-                    ]
-                  }
-                ]
-              }
-            }'
+            -d "$JSON_DATA"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
