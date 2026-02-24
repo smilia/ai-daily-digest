@@ -2,198 +2,184 @@ name: AI Daily Digest
 
 on:
   schedule:
+    # 每天 UTC 时间 02:00 运行（北京时间 10:00）
     - cron: '0 0 * * *'
   workflow_dispatch:
+    inputs:
+      hours:
+        description: '时间范围（小时）'
+        required: false
+        default: '24'
+        type: string
+      top_n:
+        description: '精选文章数量'
+        required: false
+        default: '10'
+        type: string
+      lang:
+        description: '输出语言（zh/en）'
+        required: false
+        default: 'zh'
+        type: string
 
 jobs:
   generate-digest:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v1
-        with:
-          bun-version: latest
-
-      - name: Generate Digest
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          ARCEE_API_KEY: ${{ secrets.ARCEE_API_KEY }}
-        run: |
-          # 先尝试使用 Gemini
-          echo "Trying Gemini API..."
-          bun scripts/digest.ts --hours 24 --top-n 10 --lang zh --output ./digest.md 2>&1 || GEMINI_FAILED=1
-          
-          # 检查是否失败（通过检查文件内容或错误标志）
-          if [ -n "$GEMINI_FAILED" ] || ! grep -q "🏆 今日必读" digest.md 2>/dev/null; then
-            echo "Gemini failed or output incomplete, trying Arcee AI..."
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Bun
+      uses: oven-sh/setup-bun@v1
+      with:
+        bun-version: latest
+    
+    - name: Install dependencies
+      run: bun install
+    
+    - name: Generate Digest with Arcee AI
+      env:
+        # 使用 Arcee AI 作为主要 API
+        OPENAI_API_KEY: ${{ secrets.ARCEE_API_KEY }}
+        OPENAI_API_BASE: https://api.arcee.ai/api/v1
+        OPENAI_MODEL: trinity-mini
+      run: |
+        echo "Using Arcee AI with model: trinity-mini"
+        bun scripts/digest.ts \
+          --hours ${{ github.event.inputs.hours || '24' }} \
+          --top-n ${{ github.event.inputs.top_n || '10' }} \
+          --lang ${{ github.event.inputs.lang || 'zh' }} \
+          --output ./digest.md
+        
+        echo "========== digest.md content =========="
+        cat digest.md
+        echo "========== end of digest.md =========="
+    
+    - name: Extract and Send to Feishu
+      env:
+        FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+      run: |
+        # 创建 Python 脚本来提取内容并发送到飞书
+        cat > extract_and_send.py << 'PYTHON_SCRIPT'
+        import re
+        import os
+        import json
+        import urllib.request
+        import urllib.error
+        
+        def extract_articles(content):
+            """从 digest.md 提取文章信息"""
+            articles = []
             
-            # 使用 Arcee AI (OpenAI 兼容格式)
-            export OPENAI_API_KEY="$ARCEE_API_KEY"
-            export OPENAI_API_BASE="https://api.arcee.ai/api/v1"
-            export OPENAI_MODEL="trinity-mini"
+            # 匹配文章标题和链接
+            pattern = r'\*\*(.+?)\*\*.*?\[(.+?)\]\((.+?)\).*?— \*\*(.+?)\*\*.*?· ⭐ (\d+/\d+)'  
+            matches = re.findall(pattern, content, re.DOTALL)
             
-            echo "Using Arcee AI with model: $OPENAI_MODEL"
-            bun scripts/digest.ts --hours 24 --top-n 10 --lang zh --output ./digest.md
-          fi
-          
-          echo "========== digest.md content =========="
-          cat digest.md
-          echo "========== end of digest.md =========="
-
-      - name: Extract and Send to Feishu
-        env:
-          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK_URL }}
-        run: |
-          sudo apt-get update && sudo apt-get install -y jq
-          
-          # 创建 Python 脚本文件
-          cat > extract.py << 'PYEOF'
-          import re
-          import json
-          
-          with open('digest.md', 'r', encoding='utf-8') as f:
-              content = f.read()
-          
-          print("DEBUG: File loaded, length:", len(content))
-          
-          # 提取统计信息
-          stats_match = re.search(r'\| 扫描源 \| 抓取文章 \| 时间范围 \| 精选 \|\n\|[^|]+\|[^|]+\|[^|]+\|[^|]+\|\n\|([^|]+)\|([^|]+)\|([^|]+)\|([^|]+)\|', content)
-          if stats_match:
-              scanned = stats_match.group(1).strip()
-              fetched = stats_match.group(2).strip()
-              time_range = stats_match.group(3).strip()
-              selected = stats_match.group(4).strip().replace('**', '').replace('篇', '').strip()
-          else:
-              scanned, fetched, time_range, selected = "92", "-", "24h", "10"
-          
-          md_content = f"**📊 数据概览**\\n\\n"
-          md_content += f"• 扫描源：{scanned}\\n"
-          md_content += f"• 抓取文章：{fetched}\\n"
-          md_content += f"• 时间范围：{time_range}\\n"
-          md_content += f"• 精选：{selected} 篇\\n\\n"
-          md_content += "---\\n\\n"
-          md_content += "**🏆 今日必读 Top 3**\\n\\n"
-          
-          # 提取今日必读部分
-          top_section = re.search(r'## 🏆 今日必读(.*?)(?=## |$)', content, re.DOTALL)
-          
-          if top_section:
-              section = top_section.group(1)
-              print("DEBUG: Top section found, length:", len(section))
-              
-              # 按文章分割（以 🥇 🥈 🥉 为分隔）
-              articles = re.split(r'(🥇|🥈|🥉)', section)
-              
-              for i in range(1, len(articles), 2):
-                  if i < len(articles):
-                      emoji = articles[i]
-                      article_content = articles[i+1] if i+1 < len(articles) else ""
-                      
-                      # 提取标题（**标题**）
-                      title_match = re.search(r'\*\*([^*]+)\*\*', article_content)
-                      title = title_match.group(1).strip() if title_match else "未知标题"
-                      
-                      # 提取链接 [text](url)
-                      link_match = re.search(r'$$([^$$]+)\]$(https?://[^)]+)$', article_content)
-                      link_url = link_match.group(2) if link_match else ""
-                      
-                      # 提取来源 — source · time · category
-                      source_match = re.search(r'—\s*([^·\n]+)', article_content)
-                      source = source_match.group(1).strip() if source_match else ""
-                      
-                      # 提取摘要（> 开头）
-                      summary_match = re.search(r'>\s*([^\n]+)', article_content)
-                      summary = summary_match.group(1).strip() if summary_match else ""
-                      
-                      print(f"DEBUG: {emoji} {title[:50]}... link={link_url[:50] if link_url else 'None'}")
-                      
-                      # 构建输出
-                      if link_url:
-                          md_content += f"{emoji} [{title}]({link_url})\\n"
-                      else:
-                          md_content += f"{emoji} {title}\\n"
-                      
-                      if source:
-                          md_content += f"📰 {source}\\n"
-                      if summary:
-                          md_content += f"💡 {summary[:100]}...\\n"
-                      md_content += "\\n"
-                      
-                      if i >= 5:  # 只取前3篇
-                          break
-          
-          print("=== EXTRACTED CONTENT ===")
-          print(md_content)
-          print("=== END ===")
-          
-          # 输出到文件供后续使用
-          with open('extracted_content.txt', 'w', encoding='utf-8') as f:
-              f.write(md_content)
-          PYEOF
-          
-          # 运行 Python 脚本
-          python3 extract.py
-          
-          # 构建飞书卡片 JSON
-          python3 << EOF > feishu_payload.json
-          import json
-          
-          with open('extracted_content.txt', 'r', encoding='utf-8') as f:
-              content = f.read()
-          
-          data = {
-              "msg_type": "interactive",
-              "card": {
-                  "config": {"wide_screen_mode": True},
-                  "header": {
-                      "title": {"tag": "plain_text", "content": "📰 AI 每日精选日报 $(date +%Y-%m-%d)"},
-                      "template": "blue"
-                  },
-                  "elements": [
-                      {
-                          "tag": "div",
-                          "text": {"tag": "lark_md", "content": content}
-                      },
-                      {
-                          "tag": "hr"
-                      },
-                      {
-                          "tag": "note",
-                          "elements": [{"tag": "plain_text", "content": "🤖 由 AI 智能评分筛选 | 点击按钮查看更多详情"}]
-                      },
-                      {
-                          "tag": "action",
-                          "actions": [
-                              {
-                                  "tag": "button",
-                                  "text": {"tag": "plain_text", "content": "📄 查看完整日报"},
-                                  "type": "primary",
-                                  "url": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-                              }
-                          ]
-                      }
-                  ]
-              }
-          }
-          
-          print(json.dumps(data))
-          EOF
-          
-          echo "=== Sending to Feishu ==="
-          cat feishu_payload.json
-          
-          curl -X POST "$FEISHU_WEBHOOK" \
-            -H "Content-Type: application/json" \
-            -d @feishu_payload.json
-
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: daily-digest-${{ github.run_id }}
-          path: |
-            digest.md
-            extracted_content.txt
+            for match in matches[:10]:  # 最多10篇
+                title, link_text, url, source, score = match
+                articles.append({
+                    'title': title.strip(),
+                    'url': url.strip(),
+                    'source': source.strip(),
+                    'score': score.strip()
+                })
+            
+            return articles
+        
+        def send_to_feishu(articles):
+            """发送消息到飞书"""
+            webhook = os.environ.get('FEISHU_WEBHOOK')
+            if not webhook:
+                print("Error: FEISHU_WEBHOOK not set")
+                return False
+            
+            # 构建卡片内容
+            elements = []
+            for i, article in enumerate(articles, 1):
+                elements.append({
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": f"**{i}. [{article['title']}]({article['url']})**\n📰 {article['source']} · ⭐ {article['score']}"
+                    }
+                })
+                elements.append({"tag": "hr"})
+            
+            # 移除最后一个分隔线
+            if elements:
+                elements.pop()
+            
+            card_data = {
+                "msg_type": "interactive",
+                "card": {
+                    "config": {
+                        "wide_screen_mode": True
+                    },
+                    "header": {
+                        "title": {
+                            "tag": "plain_text",
+                            "content": "📰 AI 博客每日精选"
+                        },
+                        "subtitle": {
+                            "tag": "plain_text",
+                            "content": f"精选 {len(articles)} 篇优质文章"
+                        },
+                        "template": "blue"
+                    },
+                    "elements": elements
+                }
+            }
+            
+            try:
+                req = urllib.request.Request(
+                    webhook,
+                    data=json.dumps(card_data).encode('utf-8'),
+                    headers={'Content-Type': 'application/json'},
+                    method='POST'
+                )
+                
+                with urllib.request.urlopen(req, timeout=30) as response:
+                    result = json.loads(response.read().decode('utf-8'))
+                    if result.get('code') == 0:
+                        print(f"✅ 成功发送到飞书，共 {len(articles)} 篇文章")
+                        return True
+                    else:
+                        print(f"❌ 飞书返回错误: {result}")
+                        return False
+                        
+            except Exception as e:
+                print(f"❌ 发送失败: {e}")
+                return False
+        
+        if __name__ == '__main__':
+            # 读取 digest.md
+            try:
+                with open('digest.md', 'r', encoding='utf-8') as f:
+                    content = f.read()
+            except FileNotFoundError:
+                print("Error: digest.md not found")
+                exit(1)
+            
+            # 提取文章
+            articles = extract_articles(content)
+            print(f"Extracted {len(articles)} articles")
+            
+            if articles:
+                # 发送到飞书
+                success = send_to_feishu(articles)
+                exit(0 if success else 1)
+            else:
+                print("No articles found to send")
+                exit(1)
+        PYTHON_SCRIPT
+        
+        # 运行 Python 脚本
+        python3 extract_and_send.py
+    
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: daily-digest
+        path: digest.md
+        retention-days: 30
