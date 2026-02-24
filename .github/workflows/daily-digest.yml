@@ -2,7 +2,6 @@ name: AI Daily Digest
 
 on:
   schedule:
-    # 每天北京时间早上8点运行 (UTC 0:00)
     - cron: '0 0 * * *'
   workflow_dispatch:
 
@@ -23,21 +22,79 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          bun scripts/digest.ts --hours 24 --top-n 15 --lang zh --output ./digest.md
+          bun scripts/digest.ts --hours 24 --top-n 10 --lang zh --output ./digest.md
+
+      - name: Prepare Feishu Message
+        id: prepare
+        run: |
+          # 提取今日必读部分（简化版）
+          TOP3=$(sed -n '/## 🏆 今日必读/,/---/p' digest.md | head -30)
+          
+          # 统计信息
+          STATS=$(sed -n '/## 📊 数据概览/,/---/p' digest.md | grep -E "^\|" | head -2)
+          
+          echo "top3<<EOF" >> $GITHUB_OUTPUT
+          echo "$TOP3" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Send to Feishu
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK_URL }}
         run: |
-          CONTENT=$(cat digest.md | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')
-          
-          curl -X POST \
+          # 构建飞书卡片消息
+          curl -X POST "$FEISHU_WEBHOOK" \
             -H "Content-Type: application/json" \
-            -d "{\"msg_type\": \"text\", \"content\": {\"text\": \"📰 AI 每日精选日报 $(date +%Y-%m-%d)\n\n${CONTENT:0:3000}\"}}" \
-            "${{ secrets.FEISHU_WEBHOOK_URL }}"
+            -d '{
+              "msg_type": "interactive",
+              "card": {
+                "config": {
+                  "wide_screen_mode": true
+                },
+                "header": {
+                  "title": {
+                    "tag": "plain_text",
+                    "content": "📰 AI 每日精选日报 '$(date +%Y-%m-%d)'"
+                  },
+                  "template": "blue"
+                },
+                "elements": [
+                  {
+                    "tag": "div",
+                    "text": {
+                      "tag": "lark_md",
+                      "content": "**🏆 今日必读 Top 3**\n\n从 90+ 顶级技术博客中精选，AI 智能评分筛选"
+                    }
+                  },
+                  {
+                    "tag": "hr"
+                  },
+                  {
+                    "tag": "div",
+                    "text": {
+                      "tag": "lark_md",
+                      "content": "详细日报已生成，请查看附件或访问 GitHub Actions 产物"
+                    }
+                  },
+                  {
+                    "tag": "action",
+                    "actions": [
+                      {
+                        "tag": "button",
+                        "text": {
+                          "tag": "plain_text",
+                          "content": "查看完整日报"
+                        },
+                        "type": "primary",
+                        "url": "https://github.com/'${{ github.repository }}'/actions/runs/'${{ github.run_id }}'"
+                      }
+                    ]
+                  }
+                ]
+              }
+            }'
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: daily-digest
-          path: digest.md8
+          name: daily-digest-${{ github.run_id }}
+          path: digest.md
